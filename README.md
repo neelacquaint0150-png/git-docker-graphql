@@ -25,3 +25,6 @@ Follow these steps to get your development environment running:
 ```bash
 git clone [https://github.com/your-username/git-docker-graphql.git](https://github.com/your-username/git-docker-graphql.git)
 cd git-docker-graphql
+```
+
+Cache is fully working!
