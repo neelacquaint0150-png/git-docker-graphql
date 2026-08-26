@@ -24,11 +24,17 @@ export const redis = new Redis({
 redis.on('connect', () => console.log('⚡ Connected to Redis successfully!'));
 redis.on('error', (err) => console.error('Redis error:', err.message));
 
+// 1. Fake In-Memory Database
+const fakeDB = {
+    "101": { id: "101", name: "Neel", role: "Fullstack Developer" },
+    "102": { id: "102", name: "John", role: "Frontend Developer" }
+};
+
 // Simulate a slow database query (takes 3 seconds)
 const fetchUserFromDB = async (id) => {
     return new Promise((resolve) => {
         setTimeout(() => {
-            resolve({ id, name: 'Neel', role: 'Fullstack Developer' });
+            resolve(fakeDB[id]);
         }, 3000);
     });
 };
@@ -45,6 +51,9 @@ const typeDefs = `#graphql
         healthCheck:String
         getUser(id:ID!):User
     }
+    type Mutation {
+        updateUser(id: ID!, name: String, role: String): User
+    }
 `;
 
 const resolvers = {
@@ -53,24 +62,38 @@ const resolvers = {
         healthCheck: () => 'Server, GraphQL, and Redis are ready!',
         getUser: async (_, { id }) => {
             const cacheKey = `user:${id}`;
-
-            // 1. Check if data exists in Redis cache
             const cachedUser = await redis.get(cacheKey);
 
             if (cachedUser) {
-                console.log('🚀 Returning data from Redis Cache');
+                console.log('🚀 Returning from Redis Cache');
                 return JSON.parse(cachedUser);
             }
 
-            // 2. If not in cache, fetch from "DB" (Simulated 3s delay)
-            console.log('🐢 Fetching data from slow Database...');
+            console.log('🐢 Fetching from slow Database...');
             const user = await fetchUserFromDB(id);
 
-            // 3. Save to Redis cache for future requests (Expires in 60 seconds)
-            await redis.set(cacheKey, JSON.stringify(user), 'EX', 60);
-
-            return user;
+            if (user) {
+                await redis.set(cacheKey, JSON.stringify(user), 'EX', 60);
+                return user;
+            } else {
+                throw new Error('User not found');
+            }
         },
+    },
+    Mutation: {
+        updateUser: async (_, { id, name, role }) => {
+            // Update our fake database
+            if (!fakeDB[id]) throw new Error("User not found");
+            if (name) fakeDB[id].name = name;
+            if (role) fakeDB[id].role = role;
+
+            // INVALIDATE THE CACHE: Delete the old data from Redis!
+            const cacheKey = `user:${id}`;
+            await redis.del(cacheKey);
+            console.log(`🗑️ Cache invalidated for ${cacheKey}`);
+
+            return fakeDB[id];
+        }
     },
 };
 
