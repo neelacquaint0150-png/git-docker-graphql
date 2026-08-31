@@ -41,6 +41,10 @@ const fetchUserFromDB = async (id) => {
 
 // GraphQL Schema & Resolvers
 const typeDefs = `#graphql
+    type OTPResponse {
+        success: Boolean!
+        message: String!
+    }
     type User {
         id:ID!
         name:String
@@ -53,8 +57,52 @@ const typeDefs = `#graphql
     }
     type Mutation {
         updateUser(id: ID!, name: String, role: String): User
+        sendOTP(phone: String!): OTPResponse!
+        verifyOTP(phone: String!, code: String!): OTPResponse!
     }
 `;
+
+// Helper: Send SMS via HttpSMS API
+async function sendSMSViaHttpSMS(toPhone, message) {
+    const apiKey = process.env.HTTPSMS_API_KEY;
+    const fromPhone = process.env.HTTPSMS_FROM_NUMBER;
+    console.log(`API KEY : ${apiKey}`);
+    console.log(`From Phone : ${fromPhone}`);
+    console.log(`To Phone : ${toPhone}`);
+    console.log(`Message : ${message}`);
+
+    if (!apiKey || apiKey === 'your_httpsms_api_key_here') {
+        console.log(`\n========================================`);
+        console.log(`[DEV MODE] HttpSMS API key missing.`);
+        console.log(`Simulated SMS to ${toPhone}: "${message}"`);
+        console.log(`========================================\n`);
+        return { status: 'simulated' };
+    }
+
+    const response = await fetch('https://api.httpsms.com/v1/messages/send', {
+        method: 'POST',
+        headers: {
+            'x-api-key': apiKey,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            from: fromPhone,
+            to: toPhone,
+            content: message,
+        }),
+    });
+
+    const data = await response.json();
+    console.log('HttpSMS response status:', response.status);
+    console.log('HttpSMS response ok:', response.ok);
+    console.log('HttpSMS response data:', JSON.stringify(data, null, 2));
+
+    if (!response.ok) {
+        throw new Error(data.message || 'Failed to send SMS via HttpSMS');
+    }
+
+    return data;
+}
 
 const resolvers = {
     Query: {
@@ -93,7 +141,60 @@ const resolvers = {
             console.log(`🗑️ Cache invalidated for ${cacheKey}`);
 
             return fakeDB[id];
-        }
+        }, sendOTP: async (_, { phone }) => {
+            // 1. Generate random 6-digit OTP
+            const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+            const redisKey = `otp:${phone}`;
+
+            // 2. Save OTP in Redis with 300-second (5 min) expiry
+            await redis.set(redisKey, otpCode, 'EX', 300);
+            console.log(`🔑 OTP generated for ${phone}: ${otpCode}`);
+
+            // 3. Send SMS using HttpSMS API
+            try {
+                await sendSMSViaHttpSMS(
+                    phone,
+                    `Your verification code is: ${otpCode}. Valid for 5 minutes.`
+                );
+                return {
+                    success: true,
+                    message: `OTP sent successfully to ${phone}`,
+                };
+            } catch (error) {
+                console.error('HttpSMS Error:', error.message);
+                return {
+                    success: false,
+                    message: `Failed to dispatch SMS: ${error.message}`,
+                };
+            }
+        },
+
+        verifyOTP: async (_, { phone, code }) => {
+            const redisKey = `otp:${phone}`;
+            const storedOTP = await redis.get(redisKey);
+
+            if (!storedOTP) {
+                return {
+                    success: false,
+                    message: 'OTP has expired or was never requested.',
+                };
+            }
+
+            if (storedOTP !== code) {
+                return {
+                    success: false,
+                    message: 'Invalid OTP code. Please try again.',
+                };
+            }
+
+            // Delete OTP after successful verification (Prevent reuse)
+            await redis.del(redisKey);
+
+            return {
+                success: true,
+                message: 'Phone number verified successfully!',
+            };
+        },
     },
 };
 
