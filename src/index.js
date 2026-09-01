@@ -4,9 +4,14 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer';
+import { makeExecutableSchema } from '@graphql-tools/schema';
+import { WebSocketServer } from 'ws';
+import { useServer } from 'graphql-ws/use/ws';
+import { RedisPubSub } from 'graphql-redis-subscriptions';
+import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';
 import DataLoader from 'dataloader';
-import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
@@ -19,10 +24,17 @@ const httpServer = http.createServer(app);
 const redisHost = process.env.REDIS_HOST || 'localhost';
 const redisPort = process.env.REDIS_PORT || 6379;
 
-export const redis = new Redis({
+export const redisOptions = {
     host: redisHost,
     port: Number(redisPort),
     retryStrategy: (times) => Math.min(times * 50, 2000),
+};
+
+export const redis = new Redis(redisOptions);
+
+const pubsub = new RedisPubSub({
+    publisher: new Redis(redisOptions),
+    subscriber: new Redis(redisOptions),
 });
 
 redis.on('connect', () => console.log('⚡ Connected to Redis successfully!'));
@@ -92,6 +104,9 @@ const typeDefs = `#graphql
         verifyOTP(phone: String!, code: String!): OTPResponse!
         createUser(name: String!, email: String!): DBUser!
         createPost(title: String!, authorId: Int!): DBPost! 
+    }
+    type Subscription {
+        postCreated: DBPost!
     }
 `;
 
@@ -252,14 +267,50 @@ const resolvers = {
             return prisma.user.create({ data: { name, email } });
         },
         createPost: async (_, { title, authorId }) => {
-            return prisma.post.create({ data: { title, authorId: Number(authorId) } });
+            const newPost = await prisma.post.create({
+                data: { title, authorId: Number(authorId) },
+            });
+
+            // Publish event to Redis channel 'POST_CREATED'
+            pubsub.publish('POST_CREATED', { postCreated: newPost });
+            console.log(`📢 [Redis Pub/Sub] Published POST_CREATED event for Post ID: ${newPost.id}`);
+
+            return newPost;
+        },
+    },
+    Subscription: {
+        postCreated: {
+            // Subscribe to Redis Pub/Sub channel
+            subscribe: () => pubsub.asyncIterator(['POST_CREATED']),
         },
     },
 };
 
+const schema = makeExecutableSchema({ typeDefs, resolvers });
+
+
+// 5. Setup WebSocket Server for Subscriptions
+const wsServer = new WebSocketServer({
+    server: httpServer,
+    path: '/graphql',
+});
+
+const serverCleanup = useServer({ schema }, wsServer);
+
 const server = new ApolloServer({
-    typeDefs,
-    resolvers,
+    schema,
+    plugins: [
+        ApolloServerPluginDrainHttpServer({ httpServer }),
+        {
+            async serverWillStart() {
+                return {
+                    async drainServer() {
+                        await serverCleanup.dispose();
+                    },
+                };
+            },
+        },
+    ],
 });
 
 await server.start();
@@ -279,4 +330,5 @@ app.use(
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
     console.log(`🚀 GraphQL Server running at http://localhost:${PORT}/graphql`);
+    console.log(`⚡ WebSocket Server: ws://localhost:${PORT}/graphql`);
 });
