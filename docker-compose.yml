@@ -9,13 +9,31 @@ services:
       - PORT=4000
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - HTTPSMS_API_KEY=uk_H0P1cad9wE3gBEfBMwD-QH_X6MfHz76FTtyMfQXBamJMoxK822OsvPW3HJ_1Td9R
+      - HTTPSMS_FROM_NUMBER=+13322483264
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/mydb?schema=public
     volumes:
       - .:/app
       - /app/node_modules
     depends_on:
       - redis
+      - postgres
 
   redis:
     image: redis:7-alpine
     ports:
       - "6380:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: mydb
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

@@ -5,6 +5,10 @@ import dotenv from 'dotenv';
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 import Redis from 'ioredis';
+import DataLoader from 'dataloader';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
 
 dotenv.config();
 
@@ -39,6 +43,19 @@ const fetchUserFromDB = async (id) => {
     });
 };
 
+// DataLoader function to resolve the N+1 problem
+// Instead of 10 SQL queries for 10 users, this combines user IDs into 1 query:
+// SELECT * FROM "Post" WHERE "authorId" IN (1, 2, 3...)
+const batchPostsByUserId = async (userIds) => {
+    console.log(`⚡ [DataLoader Executed] Batching DB fetch for user IDs: [${userIds.join(', ')}]`);
+
+    const posts = await prisma.post.findMany({
+        where: { authorId: { in: userIds } },
+    });
+
+    return userIds.map((id) => posts.filter((post) => post.authorId === id));
+};
+
 // GraphQL Schema & Resolvers
 const typeDefs = `#graphql
     type OTPResponse {
@@ -50,15 +67,31 @@ const typeDefs = `#graphql
         name:String
         role:String
     }
+
+    type DBUser {
+        id: ID!
+        name: String!
+        email: String!
+        posts: [DBPost!]!
+    }
+
+    type DBPost {
+        id: ID!
+        title: String!
+        authorId: Int!
+    }
     type Query{
         hello:String
         healthCheck:String
         getUser(id:ID!):User
+        users: [DBUser!]!
     }
     type Mutation {
         updateUser(id: ID!, name: String, role: String): User
         sendOTP(phone: String!): OTPResponse!
         verifyOTP(phone: String!, code: String!): OTPResponse!
+        createUser(name: String!, email: String!): DBUser!
+        createPost(title: String!, authorId: Int!): DBPost! 
     }
 `;
 
@@ -98,7 +131,18 @@ async function sendSMSViaHttpSMS(toPhone, message) {
     console.log('HttpSMS response data:', JSON.stringify(data, null, 2));
 
     if (!response.ok) {
-        throw new Error(data.message || 'Failed to send SMS via HttpSMS');
+        console.log(`data.from[0] + data.from[1] : ${data.from[0] + data.from[1]}`);
+
+        const errorMessage =
+            typeof data === 'object'
+                ? data.from[0] + data.from[1] ||
+                data.message ||
+                data.error ||
+                JSON.stringify(data)
+                : data;
+        console.log(` errorMessage : ${errorMessage}`);
+
+        // throw new Error(errorMessage);
     }
 
     return data;
@@ -127,6 +171,13 @@ const resolvers = {
                 throw new Error('User not found');
             }
         },
+        users: async () => prisma.user.findMany(),
+    },
+    DBUser: {
+        posts: (parent, _, context) => {
+            // Passes fetching responsibility to DataLoader context
+            return context.postLoader.load(parent.id);
+        },
     },
     Mutation: {
         updateUser: async (_, { id, name, role }) => {
@@ -141,7 +192,8 @@ const resolvers = {
             console.log(`🗑️ Cache invalidated for ${cacheKey}`);
 
             return fakeDB[id];
-        }, sendOTP: async (_, { phone }) => {
+        },
+        sendOTP: async (_, { phone }) => {
             // 1. Generate random 6-digit OTP
             const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
             const redisKey = `otp:${phone}`;
@@ -195,6 +247,13 @@ const resolvers = {
                 message: 'Phone number verified successfully!',
             };
         },
+
+        createUser: async (_, { name, email }) => {
+            return prisma.user.create({ data: { name, email } });
+        },
+        createPost: async (_, { title, authorId }) => {
+            return prisma.post.create({ data: { title, authorId: Number(authorId) } });
+        },
     },
 };
 
@@ -209,7 +268,12 @@ app.use(
     '/graphql',
     cors(),
     express.json(),
-    expressMiddleware(server)
+    expressMiddleware(server, {
+        // Inject fresh DataLoader instance into GraphQL Context per request
+        context: async () => ({
+            postLoader: new DataLoader(batchPostsByUserId),
+        }),
+    })
 );
 
 const PORT = process.env.PORT || 4000;
