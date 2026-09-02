@@ -14,7 +14,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 
 # Copy compiled Prisma client and app source from builder
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
